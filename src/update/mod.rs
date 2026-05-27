@@ -22,7 +22,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const RELEASES_API: &str =
-    "https://api.github.com/repos/dom-protocol/dom-wallet/releases/latest";
+    "https://api.github.com/repos/sorenplanck/dom-wallet/releases/latest";
 
 #[derive(Debug, Deserialize)]
 struct ReleaseInfo {
