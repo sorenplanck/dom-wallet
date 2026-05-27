@@ -1,14 +1,7 @@
-# DOM Wallet — Windows portable release pipeline.
+# DOM Wallet — portable Windows release pipeline (Linux cross-compile).
 #
-# Triggers:
-#   - push of a tag matching v*.*.* (e.g. v0.1.0, v1.2.3)
-#   - manual workflow_dispatch for sanity builds
-#
-# Output:
-#   - DOM-Wallet-Windows-Portable.zip attached to the GitHub release
-#     containing dom-wallet-app.exe and the default portable directory
-#     skeleton (config/ peers/ chain/ wallet/ logs/ snapshots/ runtime/ updates/)
-#     so the wallet can boot deterministically on first run.
+# Compiles Windows .exe from an Ubuntu runner using MinGW.
+# Runners Linux têm filas instantâneas mesmo em repos privados/grandes filas.
 
 name: release
 
@@ -23,19 +16,24 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows portable
-    runs-on: windows-latest
+    name: Build Windows portable (Linux cross)
+    runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust (stable, MSVC)
+      - name: Install MinGW
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+
+      - name: Install Rust (stable, gnu target)
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-gnu
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
@@ -44,59 +42,55 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-gnu-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-gnu-
 
-      - name: Build (release, x86_64-pc-windows-msvc)
+      - name: Build (release, x86_64-pc-windows-gnu)
         run: |
-          cargo build --release --target x86_64-pc-windows-msvc
-        shell: pwsh
+          cargo build --release --target x86_64-pc-windows-gnu
 
       - name: Stage portable layout
-        shell: pwsh
         run: |
-          $stage = "dist/DOM-Wallet-Windows-Portable"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/dom-wallet-app.exe" "$stage/DOM Wallet.exe"
+          STAGE="dist/DOM-Wallet-Windows-Portable"
+          mkdir -p "$STAGE"
+          cp "target/x86_64-pc-windows-gnu/release/dom-wallet-app.exe" "$STAGE/DOM Wallet.exe"
 
-          # Pre-create the portable directory skeleton so first launch is clean.
-          foreach ($d in @("chain","wallet","peers","logs","snapshots","runtime","updates","config")) {
-            New-Item -ItemType Directory -Force -Path "$stage/$d" | Out-Null
-            # Keep empty dirs in the zip
-            Set-Content -Path "$stage/$d/.keep" -Value ""
-          }
+          for d in chain wallet peers logs snapshots runtime updates config; do
+            mkdir -p "$STAGE/$d"
+            touch "$STAGE/$d/.keep"
+          done
 
-          # Ship the default config + bootstrap peer
-          if (Test-Path "packaging/windows/config/default.toml") {
-            Copy-Item "packaging/windows/config/default.toml" "$stage/config/default.toml"
-          }
-          if (Test-Path "packaging/windows/peers/peers.json") {
-            Copy-Item "packaging/windows/peers/peers.json" "$stage/peers/peers.json"
-          }
+          if [ -f "packaging/windows/config/default.toml" ]; then
+            cp "packaging/windows/config/default.toml" "$STAGE/config/default.toml"
+          fi
+          if [ -f "packaging/windows/peers/peers.json" ]; then
+            cp "packaging/windows/peers/peers.json" "$STAGE/peers/peers.json"
+          fi
 
-          # License + README inside the zip
-          Copy-Item "README.md" "$stage/README.md"
-          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage/LICENSE" }
+          cp README.md "$STAGE/README.md"
+          [ -f LICENSE ] && cp LICENSE "$STAGE/LICENSE"
 
       - name: Verify executable
-        shell: pwsh
         run: |
-          $exe = "dist/DOM-Wallet-Windows-Portable/DOM Wallet.exe"
-          if (-not (Test-Path $exe)) { throw "executable not found at $exe" }
-          $size = (Get-Item $exe).Length
-          Write-Host "DOM Wallet.exe size: $size bytes"
-          if ($size -lt 1000000) { throw "binary suspiciously small: $size bytes" }
+          EXE="dist/DOM-Wallet-Windows-Portable/DOM Wallet.exe"
+          if [ ! -f "$EXE" ]; then
+            echo "executable not found at $EXE"
+            exit 1
+          fi
+          size=$(stat -c%s "$EXE")
+          echo "DOM Wallet.exe size: $size bytes"
+          if [ "$size" -lt 1000000 ]; then
+            echo "binary suspiciously small: $size bytes"
+            exit 1
+          fi
 
       - name: Create portable ZIP
-        shell: pwsh
         run: |
-          $zip = "dist/DOM-Wallet-Windows-Portable.zip"
-          if (Test-Path $zip) { Remove-Item $zip }
-          Compress-Archive -Path "dist/DOM-Wallet-Windows-Portable/*" -DestinationPath $zip
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-          Write-Host "SHA256: $hash"
-          Set-Content -Path "dist/DOM-Wallet-Windows-Portable.zip.sha256" -Value "$hash  DOM-Wallet-Windows-Portable.zip"
+          cd dist
+          zip -r DOM-Wallet-Windows-Portable.zip DOM-Wallet-Windows-Portable
+          sha256sum DOM-Wallet-Windows-Portable.zip | awk '{print $1"  DOM-Wallet-Windows-Portable.zip"}' > DOM-Wallet-Windows-Portable.zip.sha256
+          cat DOM-Wallet-Windows-Portable.zip.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -126,13 +120,15 @@ jobs:
 
             ### Portable install
             1. Download `DOM-Wallet-Windows-Portable.zip`.
-            2. Extract to any folder. No installer, no admin rights.
-            3. Run `DOM Wallet.exe`. All state lives in the same folder.
+            2. Extract anywhere — no installer, no admin.
+            3. Run `DOM Wallet.exe`. All state lives next to the .exe.
 
-            ### What's inside
+            ### Bundled
             - `DOM Wallet.exe` — wallet + embedded DOM node + miner
-            - `config/` — defaults (bootstrap peer `168.100.8.245:33370`)
-            - `chain/`, `wallet/`, `peers/`, `runtime/`, `snapshots/`, `logs/`, `updates/`
+            - `config/default.toml` (bootstrap peer `168.100.8.245:33370`)
+            - portable directory skeleton (`chain/ wallet/ peers/ ...`)
 
             ### Verification
-            SHA-256 of the ZIP is published alongside as `.zip.sha256`.
+            SHA-256 published as `DOM-Wallet-Windows-Portable.zip.sha256`.
+
+            Built via MinGW cross-compile on Linux (`x86_64-pc-windows-gnu`).
