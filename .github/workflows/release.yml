@@ -1,0 +1,138 @@
+# DOM Wallet — Windows portable release pipeline.
+#
+# Triggers:
+#   - push of a tag matching v*.*.* (e.g. v0.1.0, v1.2.3)
+#   - manual workflow_dispatch for sanity builds
+#
+# Output:
+#   - DOM-Wallet-Windows-Portable.zip attached to the GitHub release
+#     containing dom-wallet-app.exe and the default portable directory
+#     skeleton (config/ peers/ chain/ wallet/ logs/ snapshots/ runtime/ updates/)
+#     so the wallet can boot deterministically on first run.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows portable
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build (release, x86_64-pc-windows-msvc)
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+        shell: pwsh
+
+      - name: Stage portable layout
+        shell: pwsh
+        run: |
+          $stage = "dist/DOM-Wallet-Windows-Portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/dom-wallet-app.exe" "$stage/DOM Wallet.exe"
+
+          # Pre-create the portable directory skeleton so first launch is clean.
+          foreach ($d in @("chain","wallet","peers","logs","snapshots","runtime","updates","config")) {
+            New-Item -ItemType Directory -Force -Path "$stage/$d" | Out-Null
+            # Keep empty dirs in the zip
+            Set-Content -Path "$stage/$d/.keep" -Value ""
+          }
+
+          # Ship the default config + bootstrap peer
+          if (Test-Path "packaging/windows/config/default.toml") {
+            Copy-Item "packaging/windows/config/default.toml" "$stage/config/default.toml"
+          }
+          if (Test-Path "packaging/windows/peers/peers.json") {
+            Copy-Item "packaging/windows/peers/peers.json" "$stage/peers/peers.json"
+          }
+
+          # License + README inside the zip
+          Copy-Item "README.md" "$stage/README.md"
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage/LICENSE" }
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $exe = "dist/DOM-Wallet-Windows-Portable/DOM Wallet.exe"
+          if (-not (Test-Path $exe)) { throw "executable not found at $exe" }
+          $size = (Get-Item $exe).Length
+          Write-Host "DOM Wallet.exe size: $size bytes"
+          if ($size -lt 1000000) { throw "binary suspiciously small: $size bytes" }
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          $zip = "dist/DOM-Wallet-Windows-Portable.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path "dist/DOM-Wallet-Windows-Portable/*" -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          Write-Host "SHA256: $hash"
+          Set-Content -Path "dist/DOM-Wallet-Windows-Portable.zip.sha256" -Value "$hash  DOM-Wallet-Windows-Portable.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DOM-Wallet-Windows-Portable
+          path: |
+            dist/DOM-Wallet-Windows-Portable.zip
+            dist/DOM-Wallet-Windows-Portable.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DOM-Wallet-Windows-Portable.zip
+            dist/DOM-Wallet-Windows-Portable.zip.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          name: ${{ github.ref_name }}
+          body: |
+            ## DOM Wallet ${{ github.ref_name }}
+
+            **Deterministic Monetary Network** — desktop client.
+
+            ### Portable install
+            1. Download `DOM-Wallet-Windows-Portable.zip`.
+            2. Extract to any folder. No installer, no admin rights.
+            3. Run `DOM Wallet.exe`. All state lives in the same folder.
+
+            ### What's inside
+            - `DOM Wallet.exe` — wallet + embedded DOM node + miner
+            - `config/` — defaults (bootstrap peer `168.100.8.245:33370`)
+            - `chain/`, `wallet/`, `peers/`, `runtime/`, `snapshots/`, `logs/`, `updates/`
+
+            ### Verification
+            SHA-256 of the ZIP is published alongside as `.zip.sha256`.
