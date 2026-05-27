@@ -1,0 +1,11 @@
+{
+  "168.100.8.245:33370": {
+    "address": "168.100.8.245:33370",
+    "first_seen": 0,
+    "last_seen": 0,
+    "last_height": 0,
+    "successful_connections": 0,
+    "failed_attempts": 0,
+    "is_backbone": true
+  }
+}
